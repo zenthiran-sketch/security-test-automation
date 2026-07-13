@@ -1,1 +1,1 @@
-"""HexStrike web console backend modules."""
+"""Arena Console backend modules."""

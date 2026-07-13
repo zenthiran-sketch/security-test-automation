@@ -5,10 +5,10 @@ export function Layout() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <span className="brand-mark">HX</span>
+          <span className="brand-mark">AR</span>
           <div>
-            <strong>HexStrike</strong>
-            <small>Report Console</small>
+            <strong>Arena</strong>
+            <small>Scan Console</small>
           </div>
         </div>
         <nav>

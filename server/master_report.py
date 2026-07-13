@@ -154,5 +154,5 @@ def create_master_report(
 ) -> Dict[str, Any]:
     digest = build_master_digest(store, scan_id)
     scan = store.get_scan(scan_id)
-    report_title = title or f"Master Intelligence Report: {scan['target']}"
+    report_title = title or f"Arena Master Report: {scan['target']}"
     return store.create_report_with_summary(scan_id, report_title, digest)

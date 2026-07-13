@@ -2,17 +2,17 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 
-REM HexStrike single-command setup + start for Windows Command Prompt
+REM Arena Console - single-command setup + start for Windows Command Prompt
 REM Usage: start.bat
 REM        start.bat --skip-tools
 REM        start.bat --skip-install
 
-title HexStrike Setup and Start
+title Arena Console Setup and Start
 color 0A
 
 echo.
 echo  ============================================================
-echo   HexStrike - install dependencies and start UI + API
+echo   Arena Console - install dependencies and start UI + API
 echo  ============================================================
 echo.
 
@@ -22,6 +22,7 @@ set "PYTHONIOENCODING=utf-8"
 
 if exist "%USERPROFILE%\go\bin" set "PATH=%USERPROFILE%\go\bin;%PATH%"
 if exist "%LOCALAPPDATA%\Programs\Go\bin" set "PATH=%LOCALAPPDATA%\Programs\Go\bin;%PATH%"
+if exist "%LOCALAPPDATA%\hexstrike-go\go\bin" set "PATH=%LOCALAPPDATA%\hexstrike-go\go\bin;%PATH%"
 
 set "PY_CMD="
 where python >nul 2>&1 && set "PY_CMD=python"
@@ -60,19 +61,19 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo [hexstrike] Using: %PY_CMD%
+echo [arena] Using: %PY_CMD%
 %PY_CMD% --version
 node --version
 npm --version
 echo.
 
 if exist "%~dp0.venv\Scripts\python.exe" (
-  echo [hexstrike] Existing .venv detected - will reuse / refresh it.
+  echo [arena] Existing .venv detected - will reuse / refresh it.
 )
 
-echo [hexstrike] Running setup and starting servers...
-echo [hexstrike] UI will open at http://localhost:5173
-echo [hexstrike] Press Ctrl+C later to stop both servers.
+echo [arena] Running setup and starting servers...
+echo [arena] UI will open at http://localhost:5173
+echo [arena] Press Ctrl+C later to stop both servers.
 echo.
 
 %PY_CMD% "%~dp0start.py" %*
@@ -80,7 +81,7 @@ set "EXITCODE=%ERRORLEVEL%"
 
 if not "%EXITCODE%"=="0" (
   echo.
-  echo [ERROR] HexStrike exited with code %EXITCODE%.
+  echo [ERROR] Arena Console exited with code %EXITCODE%.
   echo Check hexstrike.log in this folder for API errors.
   echo.
   pause

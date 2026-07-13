@@ -15,14 +15,14 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     })
   } catch {
     throw new Error(
-      'Cannot reach API server. Start it with: python hexstrike_server.py (port 8888)',
+      'Cannot reach API server. Start it with: start.bat or python start.py (port 8888)',
     )
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
     if (res.status === 502) {
       throw new Error(
-        'API server not running on port 8888. Run: python hexstrike_server.py',
+        'API server not running on port 8888. Run: start.bat or python start.py',
       )
     }
     throw new Error(body.error || `Request failed: ${res.status}`)

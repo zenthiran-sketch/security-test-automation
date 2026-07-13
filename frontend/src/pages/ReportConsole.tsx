@@ -168,7 +168,7 @@ function ReportDetail() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `hexstrike-report-${id}.json`
+      a.download = `arena-report-${id}.json`
       a.click()
       URL.revokeObjectURL(url)
     },

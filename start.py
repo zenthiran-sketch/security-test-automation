@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HexStrike one-command launcher.
+Arena Console one-command launcher.
 
 Installs Python + frontend dependencies, best-effort installs security CLIs,
 then starts the API (8888) and Vite frontend (5173).
@@ -47,15 +47,15 @@ GO_TOOLS = [
 
 
 def info(msg: str) -> None:
-    print(f"[hexstrike] {msg}", flush=True)
+    print(f"[arena] {msg}", flush=True)
 
 
 def warn(msg: str) -> None:
-    print(f"[hexstrike] WARNING: {msg}", flush=True)
+    print(f"[arena] WARNING: {msg}", flush=True)
 
 
 def fail(msg: str) -> None:
-    print(f"[hexstrike] ERROR: {msg}", flush=True)
+    print(f"[arena] ERROR: {msg}", flush=True)
     sys.exit(1)
 
 
@@ -331,7 +331,7 @@ def start_processes(py: Path, open_browser: bool) -> None:
 
     url = "http://localhost:5173"
     info("=" * 60)
-    info("HexStrike is ready")
+    info("Arena Console is ready")
     info(f"  UI:  {url}")
     info(f"  API: http://127.0.0.1:8888/health")
     info("Press Ctrl+C to stop both servers")
@@ -378,7 +378,7 @@ def start_processes(py: Path, open_browser: bool) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Install and start HexStrike web console")
+    parser = argparse.ArgumentParser(description="Install and start Arena Console")
     parser.add_argument("--skip-tools", action="store_true", help="Skip security CLI install attempts")
     parser.add_argument("--full", action="store_true", help="Install full requirements.txt (heavy)")
     parser.add_argument("--no-browser", action="store_true", help="Do not auto-open the browser")
