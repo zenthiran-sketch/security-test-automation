@@ -24,6 +24,17 @@ import logging
 import os
 import subprocess
 import sys
+
+# Windows consoles often default to cp1252; emoji/banner output can crash startup.
+if sys.platform == "win32":
+    os.environ.setdefault("PYTHONUTF8", "1")
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
 import traceback
 import threading
 import time
@@ -39,7 +50,11 @@ import shutil
 import venv
 import zipfile
 from pathlib import Path
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
+
+from server.db import init_db, check_db_health
+
 import psutil
 import signal
 import requests
@@ -52,18 +67,40 @@ from typing import List, Set, Tuple
 import asyncio
 import aiohttp
 from urllib.parse import urljoin, urlparse, parse_qs
-from bs4 import BeautifulSoup
-import selenium
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, WebDriverException
-import mitmproxy
-from mitmproxy import http as mitmhttp
-from mitmproxy.tools.dump import DumpMaster
-from mitmproxy.options import Options as MitmOptions
+
+try:
+    from bs4 import BeautifulSoup
+except ImportError:  # pragma: no cover
+    BeautifulSoup = None  # type: ignore
+
+try:
+    import selenium
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException, WebDriverException
+except ImportError:  # pragma: no cover
+    selenium = None  # type: ignore
+    webdriver = None  # type: ignore
+    Options = None  # type: ignore
+    By = None  # type: ignore
+    WebDriverWait = None  # type: ignore
+    EC = None  # type: ignore
+    TimeoutException = Exception  # type: ignore
+    WebDriverException = Exception  # type: ignore
+
+try:
+    import mitmproxy
+    from mitmproxy import http as mitmhttp
+    from mitmproxy.tools.dump import DumpMaster
+    from mitmproxy.options import Options as MitmOptions
+except ImportError:  # pragma: no cover
+    mitmproxy = None  # type: ignore
+    mitmhttp = None  # type: ignore
+    DumpMaster = None  # type: ignore
+    MitmOptions = None  # type: ignore
 
 # ============================================================================
 # LOGGING CONFIGURATION (MUST BE FIRST)
@@ -76,7 +113,7 @@ try:
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             logging.StreamHandler(sys.stdout),
-            logging.FileHandler('hexstrike.log')
+            logging.FileHandler('hexstrike.log', encoding='utf-8')
         ]
     )
 except PermissionError:
@@ -91,8 +128,9 @@ except PermissionError:
 logger = logging.getLogger(__name__)
 
 # Flask app configuration
-app = Flask(__name__)
+app = Flask(__name__, static_folder=None)
 app.config['JSON_SORT_KEYS'] = False
+CORS(app, resources={r"/api/*": {"origins": ["http://localhost:5173", "http://127.0.0.1:5173"]}})
 
 # API Configuration
 API_PORT = int(os.environ.get('HEXSTRIKE_PORT', 8888))
@@ -9131,7 +9169,8 @@ def health_check():
         "category_stats": category_stats,
         "cache_stats": cache.get_stats(),
         "telemetry": telemetry.get_stats(),
-        "uptime": time.time() - telemetry.stats["start_time"]
+        "uptime": time.time() - telemetry.stats["start_time"],
+        "database": check_db_health()
     })
 
 @app.route("/api/command", methods=["POST"])
@@ -9822,221 +9861,394 @@ def intelligent_smart_scan():
         return jsonify({"error": f"Server error: {str(e)}", "success": False}), 500
 
 # Helper functions for intelligent smart scan tool execution
+from server.wordlists import resolve_wordlist
+
+
+def _split_args(additional_args: str):
+    return additional_args.split() if additional_args else []
+
+
 def execute_nmap_scan(target, params):
     """Execute nmap scan with optimized parameters"""
     try:
         scan_type = params.get('scan_type', '-sV')
         ports = params.get('ports', '')
         additional_args = params.get('additional_args', '')
-
-        # Build nmap command
         cmd_parts = ['nmap', scan_type]
         if ports:
             cmd_parts.extend(['-p', ports])
-        if additional_args:
-            cmd_parts.extend(additional_args.split())
+        cmd_parts.extend(_split_args(additional_args))
         cmd_parts.append(target)
-
         return execute_command(' '.join(cmd_parts))
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+def execute_nmap_advanced_scan(target, params):
+    try:
+        ports = params.get('ports', '1-1000')
+        additional_args = params.get('additional_args', '-sC -sV -T4 -Pn')
+        cmd_parts = ['nmap']
+        if ports:
+            cmd_parts.extend(['-p', ports])
+        cmd_parts.extend(_split_args(additional_args))
+        cmd_parts.append(target)
+        return execute_command(' '.join(cmd_parts))
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def execute_rustscan_scan(target, params):
+    try:
+        additional_args = params.get('additional_args', '-a')
+        # rustscan -a <target>
+        cmd = f"rustscan {additional_args} {target} -- -sV"
+        return execute_command(cmd)
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def execute_masscan_scan(target, params):
+    try:
+        ports = params.get('ports', '80,443')
+        additional_args = params.get('additional_args', '--rate 1000')
+        cmd_parts = ['masscan', target, '-p', ports]
+        cmd_parts.extend(_split_args(additional_args))
+        return execute_command(' '.join(cmd_parts))
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 
 def execute_gobuster_scan(target, params):
-    """Execute gobuster scan with optimized parameters"""
+    """Execute gobuster with mode-aware flags and portable wordlist."""
     try:
         mode = params.get('mode', 'dir')
-        wordlist = params.get('wordlist', '/usr/share/wordlists/dirb/common.txt')
+        wordlist = resolve_wordlist(params.get('wordlist', ''))
         additional_args = params.get('additional_args', '')
-
-        cmd_parts = ['gobuster', mode, '-u', target, '-w', wordlist]
-        if additional_args:
-            cmd_parts.extend(additional_args.split())
-
+        cmd_parts = ['gobuster', mode]
+        if mode == 'dns':
+            cmd_parts.extend(['-d', target, '-w', wordlist])
+        elif mode == 'vhost':
+            cmd_parts.extend(['-u', target, '-w', wordlist])
+        else:
+            cmd_parts.extend(['-u', target, '-w', wordlist])
+        cmd_parts.extend(_split_args(additional_args))
         return execute_command(' '.join(cmd_parts))
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+
+def execute_dirb_scan(target, params):
+    try:
+        wordlist = resolve_wordlist(params.get('wordlist', ''))
+        additional_args = params.get('additional_args', '')
+        cmd_parts = ['dirb', target, wordlist]
+        cmd_parts.extend(_split_args(additional_args))
+        return execute_command(' '.join(cmd_parts))
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def execute_nuclei_scan(target, params):
-    """Execute nuclei scan with optimized parameters"""
     try:
         severity = params.get('severity', '')
         tags = params.get('tags', '')
         additional_args = params.get('additional_args', '')
-
         cmd_parts = ['nuclei', '-u', target]
         if severity:
             cmd_parts.extend(['-severity', severity])
         if tags:
             cmd_parts.extend(['-tags', tags])
-        if additional_args:
-            cmd_parts.extend(additional_args.split())
-
+        cmd_parts.extend(_split_args(additional_args))
         return execute_command(' '.join(cmd_parts))
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+
 def execute_nikto_scan(target, params):
-    """Execute nikto scan with optimized parameters"""
     try:
         additional_args = params.get('additional_args', '')
         cmd_parts = ['nikto', '-h', target]
-        if additional_args:
-            cmd_parts.extend(additional_args.split())
-
+        cmd_parts.extend(_split_args(additional_args))
         return execute_command(' '.join(cmd_parts))
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+
 def execute_sqlmap_scan(target, params):
-    """Execute sqlmap scan with optimized parameters"""
     try:
         additional_args = params.get('additional_args', '--batch --random-agent')
         cmd_parts = ['sqlmap', '-u', target]
-        if additional_args:
-            cmd_parts.extend(additional_args.split())
-
+        cmd_parts.extend(_split_args(additional_args))
         return execute_command(' '.join(cmd_parts))
     except Exception as e:
         return {"success": False, "error": str(e)}
+
 
 def execute_ffuf_scan(target, params):
-    """Execute ffuf scan with optimized parameters"""
     try:
-        wordlist = params.get('wordlist', '/usr/share/wordlists/dirb/common.txt')
+        wordlist = resolve_wordlist(params.get('wordlist', ''))
         additional_args = params.get('additional_args', '')
-
-        # Ensure target has FUZZ placeholder
         if 'FUZZ' not in target:
             target = target.rstrip('/') + '/FUZZ'
-
         cmd_parts = ['ffuf', '-u', target, '-w', wordlist]
-        if additional_args:
-            cmd_parts.extend(additional_args.split())
-
+        cmd_parts.extend(_split_args(additional_args))
         return execute_command(' '.join(cmd_parts))
     except Exception as e:
         return {"success": False, "error": str(e)}
+
 
 def execute_feroxbuster_scan(target, params):
-    """Execute feroxbuster scan with optimized parameters"""
     try:
-        wordlist = params.get('wordlist', '/usr/share/wordlists/dirb/common.txt')
+        wordlist = resolve_wordlist(params.get('wordlist', ''))
         additional_args = params.get('additional_args', '')
-
         cmd_parts = ['feroxbuster', '-u', target, '-w', wordlist]
-        if additional_args:
-            cmd_parts.extend(additional_args.split())
-
+        cmd_parts.extend(_split_args(additional_args))
         return execute_command(' '.join(cmd_parts))
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+
+def execute_wfuzz_scan(target, params):
+    try:
+        wordlist = resolve_wordlist(params.get('wordlist', ''))
+        additional_args = params.get('additional_args', '-c --hc 404')
+        fuzz_url = target if 'FUZZ' in target else target.rstrip('/') + '/FUZZ'
+        cmd_parts = ['wfuzz', '-w', wordlist]
+        cmd_parts.extend(_split_args(additional_args))
+        cmd_parts.append(fuzz_url)
+        return execute_command(' '.join(cmd_parts))
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def execute_katana_scan(target, params):
-    """Execute katana scan with optimized parameters"""
     try:
         additional_args = params.get('additional_args', '')
         cmd_parts = ['katana', '-u', target]
-        if additional_args:
-            cmd_parts.extend(additional_args.split())
-
+        cmd_parts.extend(_split_args(additional_args))
         return execute_command(' '.join(cmd_parts))
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-def execute_httpx_scan(target, params):
-    """Execute httpx scan with optimized parameters"""
-    try:
-        additional_args = params.get('additional_args', '-tech-detect -status-code')
-        # Use shell command with pipe for httpx
-        cmd = f"echo {target} | httpx {additional_args}"
 
+def execute_httpx_scan(target, params):
+    """Prefer -u for portability; fall back is not needed."""
+    try:
+        additional_args = params.get('additional_args', '-tech-detect -status-code -title -silent')
+        cmd_parts = ['httpx', '-u', target]
+        cmd_parts.extend(_split_args(additional_args))
+        return execute_command(' '.join(cmd_parts))
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def execute_wpscan_scan(target, params):
+    try:
+        additional_args = params.get('additional_args', '--enumerate p,t,u --no-banner')
+        cmd_parts = ['wpscan', '--url', target]
+        cmd_parts.extend(_split_args(additional_args))
+        return execute_command(' '.join(cmd_parts))
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def execute_dirsearch_scan(target, params):
+    try:
+        additional_args = params.get('additional_args', '')
+        cmd_parts = ['dirsearch', '-u', target]
+        cmd_parts.extend(_split_args(additional_args))
+        return execute_command(' '.join(cmd_parts))
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def execute_arjun_scan(target, params):
+    try:
+        additional_args = params.get('additional_args', '')
+        cmd_parts = ['arjun', '-u', target]
+        cmd_parts.extend(_split_args(additional_args))
+        return execute_command(' '.join(cmd_parts))
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def execute_paramspider_scan(target, params):
+    try:
+        additional_args = params.get('additional_args', '')
+        cmd_parts = ['paramspider', '-d', target]
+        cmd_parts.extend(_split_args(additional_args))
+        return execute_command(' '.join(cmd_parts))
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def execute_dalfox_scan(target, params):
+    try:
+        additional_args = params.get('additional_args', '')
+        cmd_parts = ['dalfox', 'url', target]
+        cmd_parts.extend(_split_args(additional_args))
+        return execute_command(' '.join(cmd_parts))
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def execute_jaeles_scan(target, params):
+    try:
+        additional_args = params.get('additional_args', 'scan')
+        # jaeles scan -u target
+        if additional_args.strip().startswith('scan'):
+            rest = additional_args[len('scan'):].strip()
+            cmd = f"jaeles scan -u {target} {rest}".strip()
+        else:
+            cmd = f"jaeles scan -u {target} {additional_args}".strip()
         return execute_command(cmd)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-def execute_wpscan_scan(target, params):
-    """Execute wpscan scan with optimized parameters"""
-    try:
-        additional_args = params.get('additional_args', '--enumerate p,t,u')
-        cmd_parts = ['wpscan', '--url', target]
-        if additional_args:
-            cmd_parts.extend(additional_args.split())
 
-        return execute_command(' '.join(cmd_parts))
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-def execute_dirsearch_scan(target, params):
-    """Execute dirsearch scan with optimized parameters"""
+def execute_x8_scan(target, params):
     try:
         additional_args = params.get('additional_args', '')
-        cmd_parts = ['dirsearch', '-u', target]
-        if additional_args:
-            cmd_parts.extend(additional_args.split())
-
+        cmd_parts = ['x8', '-u', target]
+        cmd_parts.extend(_split_args(additional_args))
         return execute_command(' '.join(cmd_parts))
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-def execute_arjun_scan(target, params):
-    """Execute arjun scan with optimized parameters"""
-    try:
-        additional_args = params.get('additional_args', '')
-        cmd_parts = ['arjun', '-u', target]
-        if additional_args:
-            cmd_parts.extend(additional_args.split())
-
-        return execute_command(' '.join(cmd_parts))
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-def execute_paramspider_scan(target, params):
-    """Execute paramspider scan with optimized parameters"""
-    try:
-        additional_args = params.get('additional_args', '')
-        cmd_parts = ['paramspider', '-d', target]
-        if additional_args:
-            cmd_parts.extend(additional_args.split())
-
-        return execute_command(' '.join(cmd_parts))
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-def execute_dalfox_scan(target, params):
-    """Execute dalfox scan with optimized parameters"""
-    try:
-        additional_args = params.get('additional_args', '')
-        cmd_parts = ['dalfox', 'url', target]
-        if additional_args:
-            cmd_parts.extend(additional_args.split())
-
-        return execute_command(' '.join(cmd_parts))
-    except Exception as e:
-        return {"success": False, "error": str(e)}
 
 def execute_amass_scan(target, params):
-    """Execute amass scan with optimized parameters"""
     try:
-        additional_args = params.get('additional_args', '')
+        additional_args = params.get('additional_args', '-passive')
         cmd_parts = ['amass', 'enum', '-d', target]
-        if additional_args:
-            cmd_parts.extend(additional_args.split())
-
+        cmd_parts.extend(_split_args(additional_args))
         return execute_command(' '.join(cmd_parts))
     except Exception as e:
         return {"success": False, "error": str(e)}
+
 
 def execute_subfinder_scan(target, params):
-    """Execute subfinder scan with optimized parameters"""
     try:
-        additional_args = params.get('additional_args', '')
+        additional_args = params.get('additional_args', '-silent')
         cmd_parts = ['subfinder', '-d', target]
-        if additional_args:
-            cmd_parts.extend(additional_args.split())
-
+        cmd_parts.extend(_split_args(additional_args))
         return execute_command(' '.join(cmd_parts))
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+def execute_fierce_scan(target, params):
+    try:
+        additional_args = params.get('additional_args', '')
+        cmd_parts = ['fierce', '--domain', target]
+        cmd_parts.extend(_split_args(additional_args))
+        return execute_command(' '.join(cmd_parts))
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def execute_dnsenum_scan(target, params):
+    try:
+        additional_args = params.get('additional_args', '')
+        cmd_parts = ['dnsenum', target]
+        cmd_parts.extend(_split_args(additional_args))
+        return execute_command(' '.join(cmd_parts))
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def execute_gau_scan(target, params):
+    try:
+        additional_args = params.get('additional_args', '--subs')
+        cmd = f"gau {target} {additional_args}".strip()
+        return execute_command(cmd)
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def execute_waybackurls_scan(target, params):
+    try:
+        # waybackurls expects domain on stdin or as arg depending on version
+        cmd = f"echo {target} | waybackurls"
+        return execute_command(cmd)
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def execute_hakrawler_scan(target, params):
+    try:
+        additional_args = params.get('additional_args', '-plain')
+        cmd = f"echo {target} | hakrawler {additional_args}".strip()
+        return execute_command(cmd)
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def execute_wafw00f_scan(target, params):
+    try:
+        additional_args = params.get('additional_args', '')
+        cmd_parts = ['wafw00f', target]
+        cmd_parts.extend(_split_args(additional_args))
+        return execute_command(' '.join(cmd_parts))
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def execute_uro_scan(target, params):
+    """Uro filters URL lists; seed with a single URL via stdin."""
+    try:
+        additional_args = params.get('additional_args', '')
+        cmd = f"echo {target} | uro {additional_args}".strip()
+        return execute_command(cmd)
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+from server.scan_orchestrator import register_tool_executors
+from server.routes_scans import scans_bp, reports_bp, tools_bp
+
+# ============================================================================
+# WEB CONSOLE: DIRECT SCAN PIPELINE + REPORT STORAGE
+# ============================================================================
+
+register_tool_executors({
+    "nmap": execute_nmap_scan,
+    "nmap-advanced": execute_nmap_advanced_scan,
+    "rustscan": execute_rustscan_scan,
+    "masscan": execute_masscan_scan,
+    "gobuster": execute_gobuster_scan,
+    "dirb": execute_dirb_scan,
+    "nuclei": execute_nuclei_scan,
+    "nikto": execute_nikto_scan,
+    "sqlmap": execute_sqlmap_scan,
+    "ffuf": execute_ffuf_scan,
+    "feroxbuster": execute_feroxbuster_scan,
+    "wfuzz": execute_wfuzz_scan,
+    "katana": execute_katana_scan,
+    "httpx": execute_httpx_scan,
+    "wpscan": execute_wpscan_scan,
+    "dirsearch": execute_dirsearch_scan,
+    "arjun": execute_arjun_scan,
+    "paramspider": execute_paramspider_scan,
+    "dalfox": execute_dalfox_scan,
+    "jaeles": execute_jaeles_scan,
+    "x8": execute_x8_scan,
+    "amass": execute_amass_scan,
+    "subfinder": execute_subfinder_scan,
+    "fierce": execute_fierce_scan,
+    "dnsenum": execute_dnsenum_scan,
+    "gau": execute_gau_scan,
+    "waybackurls": execute_waybackurls_scan,
+    "hakrawler": execute_hakrawler_scan,
+    "wafw00f": execute_wafw00f_scan,
+    "uro": execute_uro_scan,
+})
+
+init_db()
+
+app.register_blueprint(scans_bp, url_prefix="/api/scans")
+app.register_blueprint(reports_bp, url_prefix="/api/reports")
+app.register_blueprint(tools_bp, url_prefix="/api/tools")
 
 @app.route("/api/intelligence/technology-detection", methods=["POST"])
 def detect_technologies():
@@ -17253,9 +17465,31 @@ def get_alternative_tools():
 # Create the banner after all classes are defined
 BANNER = ModernVisualEngine.create_banner()
 
+FRONTEND_DIST = Path(__file__).resolve().parent / "frontend" / "dist"
+
+
+@app.route("/", defaults={"path": ""})
+@app.route("/<path:path>")
+def serve_frontend(path):
+    """Serve React production build when available."""
+    if path.startswith("api/") or path == "health":
+        return jsonify({"error": "Not found"}), 404
+    if FRONTEND_DIST.exists():
+        file_path = FRONTEND_DIST / path
+        if path and file_path.is_file():
+            return send_from_directory(FRONTEND_DIST, path)
+        return send_from_directory(FRONTEND_DIST, "index.html")
+    return jsonify({
+        "message": "HexStrike API Server",
+        "docs": "Build frontend with: cd frontend && npm run build",
+        "api_health": "/health",
+    })
+
 if __name__ == "__main__":
-    # Display the beautiful new banner
-    print(BANNER)
+    try:
+        print(BANNER)
+    except UnicodeEncodeError:
+        print("HexStrike AI API Server starting...")
 
     parser = argparse.ArgumentParser(description="Run the HexStrike AI API Server")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")

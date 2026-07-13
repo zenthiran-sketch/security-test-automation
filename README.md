@@ -110,7 +110,57 @@ graph TD
 
 ## Installation
 
-### Quick Setup to Run the hexstrike MCPs Server
+### One-command start (recommended)
+
+Installs Python deps (in `.venv`), frontend npm packages, best-effort security CLIs, then starts **API + UI**.
+
+#### Windows Command Prompt (cmd.exe)
+
+Open **Command Prompt**, go to this folder, then run **one** command:
+
+```bat
+start.bat
+```
+
+That is all. You can also double-click `start.bat` in Explorer. Aliases: `run.cmd` · `start-dev.bat`
+
+```bat
+cd /d "C:\path\to\hexstrike-ai"
+start.bat
+```
+
+Optional flags:
+
+```bat
+start.bat --skip-tools
+start.bat --skip-install
+start.bat --no-browser
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--skip-tools` | Skip winget/Go tool install attempts |
+| `--full` | Also install heavy `requirements.txt` |
+| `--no-browser` | Do not auto-open the browser |
+| `--skip-install` | Only start servers (after first setup) |
+
+UI: **http://localhost:5173** · API: **http://127.0.0.1:8888** · Press **Ctrl+C** to stop both.
+
+**Prerequisites (Windows):** [Python 3.10+](https://www.python.org/downloads/) with **Add to PATH**, and [Node.js LTS](https://nodejs.org/). Open a **new** Command Prompt after installing them.
+
+#### Linux / macOS
+
+```bash
+python3 start.py
+# or
+chmod +x start.sh && ./start.sh
+```
+
+For more scanners: install [Go](https://go.dev/dl/) (httpx, nuclei, subfinder, …) and/or use Kali/WSL for apt packages (nmap, nikto, sqlmap).
+
+Missing CLIs are **skipped** during scans (Report Console → Failures tab) — the app still runs.
+
+### Manual / MCP setup
 
 ```bash
 # 1. Clone the repository
@@ -124,6 +174,50 @@ source hexstrike-env/bin/activate  # Linux/Mac
 
 # 3. Install Python dependencies
 pip3 install -r requirements.txt
+
+```
+
+### Web Console (Direct Scan Pipeline + Report Console)
+
+HexStrike includes a **React web console** for running scans without AI orchestration. Prefer `python start.py` above.
+
+**Development mode** (API + Vite, if you start pieces yourself):
+
+```bash
+# Terminal 1 — API server
+python hexstrike_server.py
+
+# Terminal 2 — Frontend (proxies /api to :8888)
+cd frontend
+npm install
+npm run dev
+```
+
+Open http://localhost:5173
+
+**Production mode** (single server serves API + built UI):
+
+```bash
+cd frontend && npm install && npm run build
+cd ..
+python hexstrike_server.py
+```
+
+Open http://localhost:8888
+
+**New API endpoints:**
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/tools/catalog` | Tool list with parameter schemas for the UI |
+| `POST /api/scans` | Create scan: `{ "target": "...", "tools": [{ "name": "nmap", "params": {} }] }` or `{ "target": "...", "mode": "all_web" }` |
+| `GET /api/scans` | List scans |
+| `GET /api/scans/<id>` | Scan detail + findings |
+| `GET /api/scans/<id>/stream` | SSE live progress |
+| `GET /api/reports` | List persisted reports |
+| `GET /api/reports/<id>` | Full report with findings and tool outputs |
+
+Scan data is stored in `data/hexstrike.db`. MCP and all existing `/api/intelligence/*` endpoints remain available for AI agents.
 
 ```
 
